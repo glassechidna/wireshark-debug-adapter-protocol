@@ -518,10 +518,31 @@ local lunajson = {
     decode = newdecoder()
 }
 
-local dap = Proto("debug", "Debug Adapter Protocol")
+local function find_min_key_above(tab, above)
+    local min = 1/0
 
-local sequence_request_frames = {}
-local sequence_response_frames = {}
+    for k, _ in pairs(tab) do
+        if k < min and k > above then
+            min = k
+        end
+    end
+
+    return min ~= above and min or nil
+end
+
+local function find_max_key_below(tab, below)
+    local max = -1/0
+
+    for k, _ in pairs(tab) do
+        if k > max and k < below then
+            max = k
+        end
+    end
+
+    return max ~= below and max or nil
+end
+
+local dap = Proto("debug", "Debug Adapter Protocol")
 
 dap.fields.request_frame = ProtoField.new("Request Frame", "debug.request_frame", ftypes.FRAMENUM, frametype.REQUEST)
 dap.fields.response_frame = ProtoField.new("Response Frame", "debug.response_frame", ftypes.FRAMENUM, frametype.RESPONSE)
@@ -547,11 +568,45 @@ local MIN_PDU_LENGTH = ("Content-Length: 0\r\n\r\n"):len()
 
 local CONTENT_PATTERN = "(Content%-Length: (%d+)\r\n\r\n)"
 
+local TYPE_REQUEST = 'request'
+local TYPE_RESPONSE = 'response'
+
+local SEQUENCE_FRAMES = {
+    [TYPE_REQUEST] = {},
+    [TYPE_RESPONSE] = {},
+}
+
+local function register_sequence_frame(type, sequence_number, frame_number)
+    local type_frames = SEQUENCE_FRAMES[type]
+    local sequence_number_frames = type_frames[sequence_number]
+
+    if not sequence_number_frames then
+        sequence_number_frames = {}
+        type_frames[sequence_number] = sequence_number_frames
+    end
+
+    sequence_number_frames[frame_number] = true
+end
+
+local function find_corresponding_sequence_frame(type, sequence_number, frame_number)
+    local corresponding_type = type == TYPE_REQUEST and TYPE_RESPONSE or TYPE_REQUEST
+    local corresponding_type_frames = SEQUENCE_FRAMES[corresponding_type]
+    local sequence_number_frames = corresponding_type_frames[sequence_number]
+
+    if not sequence_number_frames then
+        return nil
+    end
+
+    return corresponding_type == TYPE_REQUEST
+        and find_max_key_below(sequence_number_frames, frame_number)
+        or find_min_key_above(sequence_number_frames, frame_number)
+end
+
 local TYPE_PARSERS = {
     request = function(content, tree, frame_number)
-        sequence_request_frames[content.seq] = frame_number
+        register_sequence_frame(TYPE_REQUEST, content.seq, frame_number)
 
-        local response_frame = sequence_response_frames[content.seq]
+        local response_frame = find_corresponding_sequence_frame(TYPE_REQUEST, content.seq, frame_number)
 
         if response_frame then
             tree:add(dap.fields.response_frame, response_frame)
@@ -563,11 +618,11 @@ local TYPE_PARSERS = {
         tree:add(dap.fields.event, content.event)
     end,
     response = function(content, tree, frame_number)
+        register_sequence_frame(TYPE_RESPONSE, content.request_seq, frame_number)
+
         tree:add(dap.fields.request_seq, content.request_seq)
 
-        sequence_response_frames[content.request_seq] = frame_number
-
-        local request_frame = sequence_request_frames[content.request_seq]
+        local request_frame = find_corresponding_sequence_frame(TYPE_RESPONSE, content.request_seq, frame_number)
 
         if request_frame then
             tree:add(dap.fields.request_frame, request_frame)
