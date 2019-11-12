@@ -576,22 +576,39 @@ local SEQUENCE_FRAMES = {
     [TYPE_RESPONSE] = {},
 }
 
-local function register_sequence_frame(type, sequence_number, frame_number)
+local function register_sequence_frame(type, source_port, destination_port, sequence_number, frame_number)
     local type_frames = SEQUENCE_FRAMES[type]
-    local sequence_number_frames = type_frames[sequence_number]
+
+    local connection_identifier = type == TYPE_REQUEST and source_port .. destination_port or destination_port .. source_port
+    local connection_frames = type_frames[connection_identifier]
+
+    if not connection_frames then
+        connection_frames = {}
+        type_frames[connection_identifier] = connection_frames
+    end
+
+    local sequence_number_frames = connection_frames[sequence_number]
 
     if not sequence_number_frames then
         sequence_number_frames = {}
-        type_frames[sequence_number] = sequence_number_frames
+        connection_frames[sequence_number] = sequence_number_frames
     end
 
     sequence_number_frames[frame_number] = true
 end
 
-local function find_corresponding_sequence_frame(type, sequence_number, frame_number)
+local function find_corresponding_sequence_frame(type, source_port, destination_port, sequence_number, frame_number)
     local corresponding_type = type == TYPE_REQUEST and TYPE_RESPONSE or TYPE_REQUEST
     local corresponding_type_frames = SEQUENCE_FRAMES[corresponding_type]
-    local sequence_number_frames = corresponding_type_frames[sequence_number]
+
+    local connection_identifier = type == TYPE_REQUEST and source_port .. destination_port or destination_port .. source_port
+    local connection_frames = corresponding_type_frames[connection_identifier]
+
+    if not connection_frames then
+        return nil
+    end
+
+    local sequence_number_frames = connection_frames[sequence_number]
 
     if not sequence_number_frames then
         return nil
@@ -603,10 +620,10 @@ local function find_corresponding_sequence_frame(type, sequence_number, frame_nu
 end
 
 local TYPE_PARSERS = {
-    request = function(content, tree, frame_number)
-        register_sequence_frame(TYPE_REQUEST, content.seq, frame_number)
+    request = function(content, tree, source_port, destination_port, frame_number)
+        register_sequence_frame(TYPE_REQUEST, source_port, destination_port, content.seq, frame_number)
 
-        local response_frame = find_corresponding_sequence_frame(TYPE_REQUEST, content.seq, frame_number)
+        local response_frame = find_corresponding_sequence_frame(TYPE_REQUEST, source_port, destination_port, content.seq, frame_number)
 
         if response_frame then
             tree:add(dap.fields.response_frame, response_frame)
@@ -614,15 +631,15 @@ local TYPE_PARSERS = {
 
         tree:add(dap.fields.command, content.command)
     end,
-    event = function(content, tree, frame_number)
+    event = function(content, tree, source_port, destination_port, frame_number)
         tree:add(dap.fields.event, content.event)
     end,
-    response = function(content, tree, frame_number)
-        register_sequence_frame(TYPE_RESPONSE, content.request_seq, frame_number)
+    response = function(content, tree, source_port, destination_port, frame_number)
+        register_sequence_frame(TYPE_RESPONSE, source_port, destination_port, content.request_seq, frame_number)
 
         tree:add(dap.fields.request_seq, content.request_seq)
 
-        local request_frame = find_corresponding_sequence_frame(TYPE_RESPONSE, content.request_seq, frame_number)
+        local request_frame = find_corresponding_sequence_frame(TYPE_RESPONSE, source_port, destination_port, content.request_seq, frame_number)
 
         if request_frame then
             tree:add(dap.fields.request_frame, request_frame)
@@ -676,7 +693,7 @@ local function dissect(buffer, pinfo, tree)
         local parser = TYPE_PARSERS[content.type]
 
         if parser then
-            parser(content, pdu_tree, pinfo.number)
+            parser(content, pdu_tree, pinfo.src_port, pinfo.dst_port, pinfo.number)
         end
 
         pdu_tree:add(dap.fields.json, json_buffer, json_string)
